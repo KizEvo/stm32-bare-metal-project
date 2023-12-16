@@ -15,6 +15,7 @@ SECTIONS {
 	.data : {
 		_sdata = .;		/* Start address of sram */
 		*(.data)
+		. = ALIGN(4);
 		_edata = .;		/* Address: *(.data) + sram */
 	} > sram AT > flash /* Data section */
 	
@@ -23,7 +24,8 @@ SECTIONS {
 	.bss : {
 		_sbss = .;
 		*(.bss)
-		*(COMMON)		/* All un-initialized input files */
+		*(COMMON)		/* All un-initialized input files, it can be uninitialized user-defined data variable*/
+		. = ALIGN(4);
 		_ebss = .;
 	} > sram			/* Zero-initialized data section */
 }
