@@ -1,6 +1,81 @@
+#include <stdint.h>
+
+typedef struct {
+	volatile uint32_t CRL, CRH, IDR, ODR, BSRR, BRR, LCKR;
+} _GPIO;
+
+typedef struct {
+	volatile uint32_t CR, CFGR, CIR, APB2RSTR, APB1RSTR, 
+						AHBENR, APB2ENR, APB1ENR, BDCR, CSR, AHBSTR, CFGR2;
+} _RCC;
+
+enum GPIO_BANK {A, B, C, D, E, F, G};
+
+#define GPIO_Init(port)	(_GPIO *)(0x40010800 + 0x400*(port))
+#define RCC_Init		(_RCC *)(0x40021000)
+
+enum PORT_CONFIG_CNF_INPUT 	{INPUT_ANALOG, INPUT_FLOATING, INPUT_PULL};
+enum PORT_CONFIG_CNF_OUTPUT	{OUTPUT_PUSHPULL, OUTPUT_OPENDRAIN, OUTPUT_AF_PUSHPULL, OUTPUT_AF_OPENDRAIN};
+enum PORT_CONFIG_MODE 		{MODE_INPUT, MODE_OUTPUT_MEDIUM, MODE_OUTPUT_LOW, MODE_OUTPUT_HIGH};
+enum APB2_ENABLE_CLOCK		{AFIO, IOPA = 2, IOPB, IOPC, IOPD, IOPE, ADC1 = 9, ADC2, TIM1, SPI1, USART1 = 14};
+
+// Initialize peripherals
+_RCC *RCC = RCC_Init;			// Reset and clock control
+_GPIO *GPIOC = GPIO_Init(C);	// GPIOC
+
+void GPIO_PortConfig(_GPIO *GPIO, uint8_t pin, uint8_t mode, uint8_t cnf)
+{
+	if(pin <= 7)
+	{
+		GPIO->CRL &= ~(mode << (4*pin));
+		GPIO->CRL &= ~((cnf << 2) << (4*pin));
+		GPIO->CRL |= (mode << (4*pin));
+		GPIO->CRL |= ((cnf << 2) << (4*pin));
+	}
+	else
+	{
+		GPIO->CRH &= ~(mode << (4*pin));
+		GPIO->CRH &= ~((cnf << 2) << (4*pin));
+		GPIO->CRH |= (mode << (4*pin));
+		GPIO->CRH |= ((cnf << 2) << (4*pin));
+	}
+}
+
+void RCC_SystemClockInit(void)
+{
+	// Wait for HSIRDY flag to be enabled by hardware
+	while(!((RCC->CR & 1 << 1) != 0));
+	// Pick HSI as main system clock source
+	RCC->CFGR &= ~(3 << 0);
+}
+
+void RCC_EnablePeripheralClock(uint8_t peripheral)
+{
+	RCC->APB2ENR &= ~(1 << peripheral);
+	RCC->APB2ENR |= (1 << peripheral);
+}
+
+void delay(uint32_t counter)
+{
+	uint32_t temp = counter;
+	while(counter--)
+		while(temp--);
+}
+
 int main(void)
 {
-	while(1);
+	RCC_SystemClockInit();
+	
+	RCC_EnablePeripheralClock(IOPA);
+	GPIO_PortConfig(GPIOC, 13, MODE_OUTPUT_LOW, OUTPUT_PUSHPULL);
+	
+	while(1)
+	{
+		GPIOC->ODR &= ~(1 << 13);
+		delay(10000);
+		GPIOC->ODR |= ~(1 << 13);
+		delay(10000);
+	}
 	return 0;
 }
 
