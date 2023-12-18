@@ -11,8 +11,8 @@ typedef struct {
 
 enum GPIO_BANK {A, B, C, D, E, F, G};
 
-#define GPIO_Init(port)	(_GPIO *)(0x40010800 + 0x400*(port))
-#define RCC_Init		(_RCC *)(0x40021000)
+#define GPIO_Init(port)	((_GPIO *)(0x40010800 + 0x400*(port)))
+#define RCC_Init		((_RCC *)(0x40021000))
 
 enum PORT_CONFIG_CNF_INPUT 	{INPUT_ANALOG, INPUT_FLOATING, INPUT_PULL};
 enum PORT_CONFIG_CNF_OUTPUT	{OUTPUT_PUSHPULL, OUTPUT_OPENDRAIN, OUTPUT_AF_PUSHPULL, OUTPUT_AF_OPENDRAIN};
@@ -27,15 +27,14 @@ void GPIO_PortConfig(_GPIO *GPIO, uint8_t pin, uint8_t mode, uint8_t cnf)
 {
 	if(pin <= 7)
 	{
-		GPIO->CRL &= ~(mode << (4*pin));
-		GPIO->CRL &= ~((cnf << 2) << (4*pin));
+		GPIO->CRL &= ~(0xF << (4*pin));
 		GPIO->CRL |= (mode << (4*pin));
 		GPIO->CRL |= ((cnf << 2) << (4*pin));
 	}
 	else
 	{
-		GPIO->CRH &= ~(mode << (4*pin));
-		GPIO->CRH &= ~((cnf << 2) << (4*pin));
+		pin -= 8;
+		GPIO->CRH &= ~(0xF << (4*pin));
 		GPIO->CRH |= (mode << (4*pin));
 		GPIO->CRH |= ((cnf << 2) << (4*pin));
 	}
@@ -58,22 +57,27 @@ void RCC_EnablePeripheralClock(uint8_t peripheral)
 void delay(uint32_t counter)
 {
 	uint32_t temp = counter;
-	while(counter--)
-		while(temp--);
+	while(counter > 0)
+	{
+		counter--;
+		while(temp > 0)
+		{
+			temp--;
+		}			
+	}
 }
 
 int main(void)
 {
 	RCC_SystemClockInit();
-	
-	RCC_EnablePeripheralClock(IOPA);
+	RCC_EnablePeripheralClock(IOPC);
 	GPIO_PortConfig(GPIOC, 13, MODE_OUTPUT_LOW, OUTPUT_PUSHPULL);
 	
 	while(1)
 	{
 		GPIOC->ODR &= ~(1 << 13);
 		delay(10000);
-		GPIOC->ODR |= ~(1 << 13);
+		GPIOC->ODR |= (1 << 13);
 		delay(10000);
 	}
 	return 0;
@@ -83,21 +87,19 @@ int main(void)
 __attribute__((noreturn, naked)) void Reset_Handler(void)
 {
 	// Start and end address of different sections defined in linker.ld
-	extern unsigned int _sdata, _edata, _sbss, _ebss, _sizedata;
+	extern uint32_t _sdata, _edata, _sbss, _ebss, _sizedata;
 	
 	// .bss section, zero initialize variables
-	for(unsigned int *dest = &_sbss; dest < &_ebss; dest++)
+	for(uint32_t *dest = &_sbss; dest < &_ebss; dest++)
 	{
 		*dest = 0;
 	}
 	
 	// .data section, copy from flash to sram
-	unsigned int *src = &_sizedata, *dest = &_sdata;
+	uint32_t *src = &_sizedata, *dest = &_sdata;
 	while(dest < &_edata)
 	{
-		*dest = *src;
-		dest++;
-		src++;
+		*dest++ = *src++;
 	}
 	
 	// Call main()
@@ -185,7 +187,7 @@ __attribute__ ((weak, alias ("Default_Handler"))) void DMA2_Channel3_Handler(voi
 __attribute__ ((weak, alias ("Default_Handler"))) void DMA2_Channel4_5_Handler(void);
 
 // Vector tables
-__attribute__((section(".vectors"))) void (*const tables[16 + 60])(void) = {
+__attribute__((section(".vectors"))) void (*const tables[])(void) = {
 	_estack,
 	Reset_Handler,
 	NMI_Handler,
