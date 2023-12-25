@@ -2,17 +2,21 @@
 
 typedef struct {
 	volatile uint32_t CRL, CRH, IDR, ODR, BSRR, BRR, LCKR;
-} _GPIO;
+} GPIO_TypeDef;
 
 typedef struct {
-	volatile uint32_t CR, CFGR, CIR, APB2RSTR, APB1RSTR, 
-						AHBENR, APB2ENR, APB1ENR, BDCR, CSR, AHBSTR, CFGR2;
-} _RCC;
+	volatile uint32_t CR, CFGR, CIR, APB2RSTR, APB1RSTR, AHBENR, APB2ENR, APB1ENR, BDCR, CSR, AHBSTR, CFGR2;
+} RCC_TypeDef;
+
+typedef struct {
+	volatile uint32_t CTRL, LOAD, VAL, CALIB;
+} STK_TypeDef;
 
 enum GPIO_BANK {A, B, C, D, E, F, G};
 
-#define GPIO_Init(port)	((_GPIO *)(0x40010800 + 0x400*(port)))
-#define RCC_Init		((_RCC *)(0x40021000))
+#define GPIO_Init(port)	((GPIO_TypeDef *)(0x40010800 + 0x400*(port)))
+#define RCC_Init		((RCC_TypeDef *)(0x40021000))
+#define STK_Init    	((STK_TypeDef *)(0xE000E010))
 
 enum PORT_CONFIG_CNF_INPUT 	{INPUT_ANALOG, INPUT_FLOATING, INPUT_PULL};
 enum PORT_CONFIG_CNF_OUTPUT	{OUTPUT_PUSHPULL, OUTPUT_OPENDRAIN, OUTPUT_AF_PUSHPULL, OUTPUT_AF_OPENDRAIN};
@@ -20,10 +24,11 @@ enum PORT_CONFIG_MODE 		{MODE_INPUT, MODE_OUTPUT_MEDIUM, MODE_OUTPUT_LOW, MODE_O
 enum APB2_ENABLE_CLOCK		{AFIO, IOPA = 2, IOPB, IOPC, IOPD, IOPE, ADC1 = 9, ADC2, TIM1, SPI1, USART1 = 14};
 
 // Initialize peripherals
-_RCC *RCC = RCC_Init;			// Reset and clock control
-_GPIO *GPIOC = GPIO_Init(C);	// GPIOC
+RCC_TypeDef *RCC = RCC_Init;				// Reset and clock control
+GPIO_TypeDef *GPIOC = GPIO_Init(C);			// GPIOC
+STK_TypeDef *STK = STK_Init;				// SysTick
 
-void GPIO_PortConfig(_GPIO *GPIO, uint8_t pin, uint8_t mode, uint8_t cnf)
+void GPIO_PortConfig(GPIO_TypeDef *GPIO, uint8_t pin, uint8_t mode, uint8_t cnf)
 {
 	if(pin <= 7)
 	{
@@ -42,10 +47,29 @@ void GPIO_PortConfig(_GPIO *GPIO, uint8_t pin, uint8_t mode, uint8_t cnf)
 
 void RCC_SystemClockInit(void)
 {
-	// Wait for HSIRDY flag to be enabled by hardware
-	while(!((RCC->CR & 1 << 1) != 0));
-	// Pick HSI as main system clock source
-	RCC->CFGR &= ~(3 << 0);
+	// PLL Multiplication factor x4
+	RCC->CFGR |= (0b0010 << 18);
+	
+	// Turn on HSEON flag
+	RCC->CR |= (1 << 16);
+	
+	// Wait for HSERDY flag to be setted by hardware
+	while(!((RCC->CR & 1 << 17) != 0));
+	
+	// Changing PLL entry clock source to HSE
+	RCC->CFGR |= (1 << 16);
+	
+	// Turn off HSI clock
+	RCC->CR |= (1 << 0);
+	
+	// Wait for PLLRDY flag to be cleared by hardware
+	while((RCC->CR & 1 << 25) != 0);
+	
+	// Turn on PLL clock
+	RCC->CR |= (1 << 24);
+	
+	// Pick PLL as main system clock source
+	RCC->CFGR |= (0b10 << 0);
 }
 
 void RCC_EnablePeripheralClock(uint8_t peripheral)
@@ -54,31 +78,45 @@ void RCC_EnablePeripheralClock(uint8_t peripheral)
 	RCC->APB2ENR |= (1 << peripheral);
 }
 
-void delay(uint32_t counter)
+void SysTick_Config(void)
 {
-	uint32_t temp = counter;
-	while(counter > 0)
-	{
-		counter--;
-		while(temp > 0)
-		{
-			temp--;
-		}			
-	}
+	// AHB/8 = 4MHz as clock source for SysTick
+	STK->CTRL &= ~(1 << 2);
+}
+
+void delay(uint16_t ms)
+{
+	// Load RELOAD value of (3999 clock pulses)*ms before interrupt
+	// 3999 clock pulses = 1ms
+	STK->LOAD |= ((4000 - 1)*ms);
+	
+	// Clear counter value
+	STK->VAL &= ~(0xFFFFFF);
+	
+	// Enable the counter
+	STK->CTRL |= (1 << 0);
+	
+	// Wait for ms
+	while(!((STK->CTRL & 1 << 16) != 0));
+	
+	// Disable the counter
+	STK->CTRL &= ~(1 << 0);
+	
 }
 
 int main(void)
 {
 	RCC_SystemClockInit();
 	RCC_EnablePeripheralClock(IOPC);
+	SysTick_Config();
 	GPIO_PortConfig(GPIOC, 13, MODE_OUTPUT_LOW, OUTPUT_PUSHPULL);
 	
 	while(1)
 	{
 		GPIOC->ODR &= ~(1 << 13);
-		delay(10000);
+		delay(1000);
 		GPIOC->ODR |= (1 << 13);
-		delay(10000);
+		delay(1000);
 	}
 	return 0;
 }
