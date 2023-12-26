@@ -12,21 +12,31 @@ typedef struct {
 	volatile uint32_t CTRL, LOAD, VAL, CALIB;
 } STK_TypeDef;
 
-enum GPIO_BANK {A, B, C, D, E, F, G};
+typedef struct {
+	volatile uint32_t SR, DR, BRR, CR1, CR2, CR3, GTPR;
+} USART_TypeDef;
 
+void delay(uint16_t ms);
+
+// Refer to the STM32F103 datasheet
 #define GPIO_Init(port)	((GPIO_TypeDef *)(0x40010800 + 0x400*(port)))
 #define RCC_Init		((RCC_TypeDef *)(0x40021000))
+#define USART1_Init		((USART_TypeDef *)(0x40013800))
+// Refer to STM32F10xxx Cortex M3 programming manual
 #define STK_Init    	((STK_TypeDef *)(0xE000E010))
 
+enum GPIO_BANK {A, B, C, D, E, F, G};
 enum PORT_CONFIG_CNF_INPUT 	{INPUT_ANALOG, INPUT_FLOATING, INPUT_PULL};
 enum PORT_CONFIG_CNF_OUTPUT	{OUTPUT_PUSHPULL, OUTPUT_OPENDRAIN, OUTPUT_AF_PUSHPULL, OUTPUT_AF_OPENDRAIN};
 enum PORT_CONFIG_MODE 		{MODE_INPUT, MODE_OUTPUT_MEDIUM, MODE_OUTPUT_LOW, MODE_OUTPUT_HIGH};
-enum APB2_ENABLE_CLOCK		{AFIO, IOPA = 2, IOPB, IOPC, IOPD, IOPE, ADC1 = 9, ADC2, TIM1, SPI1, USART1 = 14};
+enum APB2_ENABLE_CLOCK		{AFIO_CK, IOPA_CK = 2, IOPB_CK, IOPC_CK, IOPD_CK, IOPE_CK, ADC1_CK = 9, ADC2_CK, TIM1_CK, SPI1_CK, USART1_CK = 14};
 
 // Initialize peripherals
 RCC_TypeDef *RCC = RCC_Init;				// Reset and clock control
 GPIO_TypeDef *GPIOC = GPIO_Init(C);			// GPIOC
+GPIO_TypeDef *GPIOA = GPIO_Init(A);			// GPIOA
 STK_TypeDef *STK = STK_Init;				// SysTick
+USART_TypeDef *USART1 = USART1_Init;		// USART1
 
 void GPIO_PortConfig(GPIO_TypeDef *GPIO, uint8_t pin, uint8_t mode, uint8_t cnf)
 {
@@ -72,15 +82,50 @@ void RCC_SystemClockInit(void)
 	RCC->CFGR |= (0b10 << 0);
 }
 
-void RCC_EnablePeripheralClock(uint8_t peripheral)
+
+void USART1_TransmitConfig(void)
+{
+	// Word length = 8
+	// 1 stop bit
+	// Default
+		
+	// Enable USART transmitter
+	USART1->CR1 |= (1 << 13);
+	
+	// Baud rate = f_CLK / (16*USARTDIV) = 32MHz / (16*208.333) = 9600 baud
+	// USARTDIV = mantissa.(fraction / 16)
+	uint32_t mantissa = 208;
+	uint8_t fraction = 6;
+	USART1->BRR = ((mantissa << 4) | fraction);
+
+	// Start bit, (active low)
+	USART1->CR1 |= (1 << 3);
+}
+
+void USART1_WriteBuffer(char byte)
+{	
+	// Write data to data register
+	USART1->DR = byte;
+	
+	// Wait until transmit data register is empty
+	while(!((USART1->SR & 1 << 7) != 0));
+}
+
+void USART_WriteString(char *string)
+{
+	for(uint16_t i = 0; string[i] != '\0'; i++)
+		USART1_WriteBuffer(string[i]);
+}
+
+static inline void RCC_EnablePeripheralClock(uint8_t peripheral)
 {
 	RCC->APB2ENR &= ~(1 << peripheral);
 	RCC->APB2ENR |= (1 << peripheral);
 }
 
-void SysTick_Config(void)
+static inline void SysTick_Config(void)
 {
-	// AHB/8 = 4MHz as clock source for SysTick
+	// Pick AHB/8 (= 4MHz) as clock source for SysTick
 	STK->CTRL &= ~(1 << 2);
 }
 
@@ -101,22 +146,33 @@ void delay(uint16_t ms)
 	
 	// Disable the counter
 	STK->CTRL &= ~(1 << 0);
-	
 }
 
 int main(void)
 {
 	RCC_SystemClockInit();
-	RCC_EnablePeripheralClock(IOPC);
 	SysTick_Config();
+	
+	RCC_EnablePeripheralClock(AFIO_CK);
+	RCC_EnablePeripheralClock(IOPC_CK);
+	RCC_EnablePeripheralClock(IOPA_CK);
+	RCC_EnablePeripheralClock(USART1_CK);
+	
+	// LED 13
 	GPIO_PortConfig(GPIOC, 13, MODE_OUTPUT_LOW, OUTPUT_PUSHPULL);
+	// UART Tx, Rx 
+	GPIO_PortConfig(GPIOA, 9, MODE_OUTPUT_HIGH, OUTPUT_AF_PUSHPULL);
+	GPIO_PortConfig(GPIOA, 10, MODE_INPUT, INPUT_FLOATING);
+	
+	USART1_TransmitConfig();
 	
 	while(1)
 	{
 		GPIOC->ODR &= ~(1 << 13);
-		delay(1000);
+		USART_WriteString("Hello World\r\n");
+		delay(500);
 		GPIOC->ODR |= (1 << 13);
-		delay(1000);
+		delay(500);
 	}
 	return 0;
 }
