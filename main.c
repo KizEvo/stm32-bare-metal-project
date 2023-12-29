@@ -16,12 +16,17 @@ typedef struct {
 	volatile uint32_t SR, DR, BRR, CR1, CR2, CR3, GTPR;
 } USART_TypeDef;
 
+typedef struct {
+	volatile uint32_t SR, CR1, CR2, SMPR1, SMPR2, JOFR1, JOFR2, JOFR3, JOFR4, HTR, LTR, SQR1, SQR2, SQR3, JSQR, JDR1, JDR2, JDR3, JDR4, DR;
+} ADC_TypeDef;
+
 void delay(uint16_t ms);
 
 // Refer to the STM32F103 datasheet
 #define GPIO_Init(port)	((GPIO_TypeDef *)(0x40010800 + 0x400*(port)))
 #define RCC_Init		((RCC_TypeDef *)(0x40021000))
 #define USART1_Init		((USART_TypeDef *)(0x40013800))
+#define ADC1_Init		((ADC_TypeDef *)(0x40012400))
 // Refer to STM32F10xxx Cortex M3 programming manual
 #define STK_Init    	((STK_TypeDef *)(0xE000E010))
 
@@ -37,6 +42,10 @@ GPIO_TypeDef *GPIOC = GPIO_Init(C);			// GPIOC
 GPIO_TypeDef *GPIOA = GPIO_Init(A);			// GPIOA
 STK_TypeDef *STK = STK_Init;				// SysTick
 USART_TypeDef *USART1 = USART1_Init;		// USART1
+ADC_TypeDef *ADC1 = ADC1_Init;				// ADC1
+
+// Global variables
+volatile uint16_t ADC_CAL_ERR_VAL;
 
 void GPIO_PortConfig(GPIO_TypeDef *GPIO, uint8_t pin, uint8_t mode, uint8_t cnf)
 {
@@ -117,6 +126,67 @@ void USART_WriteString(char *string)
 		USART1_WriteBuffer(string[i]);
 }
 
+void ADC1_Config(void)
+{
+	// Sample time = 1.5 clock cycles
+	// Data right alignment in ADC_DR
+	// Default
+	
+	// Continuous conversion
+	ADC1->CR2 |= (1 << 1);
+	
+	// Perform 1 conversion in the regular channel conversion sequence
+	ADC1->SQR1 &= ~(0xF << 20);
+	
+	// Set ADC1 channel 1 is the first sequence to be converted
+	// Since we tell it to do 1 conversion only in the sequence 
+	// so this is the only channel of the ADC to be converted
+	ADC1->SQR3 |= (1 << 0);
+	
+	// Enable external trigger conversion mode
+	ADC1->CR2 |= (1 << 20);
+	
+	// Select external trigger event for regular channel, 0b111 = SWSTART
+	ADC1->CR2 |= (0b111 << 17);
+	
+	// Turn on ADC
+	ADC1->CR2 |= (1 << 0);
+	
+	// Wait for few clocks before starting calibration
+	delay(12);
+	
+	// Start ADC calibration
+	ADC1->CR2 |= (1 << 2);
+	
+	// Wait until calibration is finished (hardware clears this bit)
+	while((ADC1->CR2 & 1 << 2) != 0);
+	
+	// Read the calibration error value in ADC_DR
+	ADC_CAL_ERR_VAL = ADC1->DR;
+	
+	// Wait for few clocks t_STAB
+	delay(48);
+}
+
+char *numbToString(uint32_t numb)
+{
+    static char temp[32], string[33];
+    uint8_t idx = 0;
+    while(numb != 0)
+    {
+        temp[idx++] = (numb % 10) + '0';
+        numb = numb / 10;
+    }
+	// Reverse the string order
+    for(uint8_t i = 0; i < idx; i++)
+    {
+        string[i] = temp[idx - i - 1];
+    }
+	// Null terminated char
+    string[idx] = '\0';
+    return string;
+}
+
 static inline void RCC_EnablePeripheralClock(uint8_t peripheral)
 {
 	RCC->APB2ENR &= ~(1 << peripheral);
@@ -157,19 +227,38 @@ int main(void)
 	RCC_EnablePeripheralClock(IOPC_CK);
 	RCC_EnablePeripheralClock(IOPA_CK);
 	RCC_EnablePeripheralClock(USART1_CK);
+	RCC_EnablePeripheralClock(ADC1_CK);
 	
 	// LED 13
 	GPIO_PortConfig(GPIOC, 13, MODE_OUTPUT_LOW, OUTPUT_PUSHPULL);
-	// UART Tx, Rx 
+	// UART Tx, Rx - refers to GPIO configurations for device peripherals /pg.166
 	GPIO_PortConfig(GPIOA, 9, MODE_OUTPUT_HIGH, OUTPUT_AF_PUSHPULL);
 	GPIO_PortConfig(GPIOA, 10, MODE_INPUT, INPUT_FLOATING);
+	// ADC1 channel 1
+	GPIO_PortConfig(GPIOA, 1, MODE_INPUT, INPUT_ANALOG);
 	
 	USART1_TransmitConfig();
+	ADC1_Config();
+	
+	// start ADC conversion of regular channel
+	ADC1->CR2 |= (1 << 22); 
 	
 	while(1)
 	{
+		if((ADC1->SR & 1 << 1) != 0)
+		{
+			uint16_t adc_raw_data = ADC1->DR;
+			adc_raw_data -= ADC_CAL_ERR_VAL;
+			// Fixed point arithmetic, precision 1e-1
+			uint32_t voltage_divider = ((adc_raw_data * 10) * (33))/40960;
+			uint32_t pot_val = 20000/(((330) / voltage_divider) - 10);
+			char *pot_val_str = numbToString(pot_val);
+			USART_WriteString(pot_val_str);
+			USART_WriteString("\r\n");
+			ADC1->SR &= ~(1 << 1);	// clears ADC EOC flag
+			ADC1->CR2 |= (1 << 22); // start ADC conversion of regular channel
+		}
 		GPIOC->ODR &= ~(1 << 13);
-		USART_WriteString("Hello World\r\n");
 		delay(500);
 		GPIOC->ODR |= (1 << 13);
 		delay(500);
