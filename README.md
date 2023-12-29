@@ -5,6 +5,7 @@ If you wish to use this repo, prepare the following hardwares/softwares:
   - STM32F103C8T6 (Blue pill)
   - ST-Link V2 (Programmer)
   - CP2102 module (UART to USB)
+  - A potentiometer (For ADC)
   - stlink toolset (Flashing firmware)
   - ARM GNU Toolchain (Compiling)
   - Makefiles (Build automation)
@@ -16,3 +17,4 @@ Current all of the functions, peripheral initialization happens in a single **ma
 - [x] Setup blinky LED
 - [x] Setup SysTick timer
 - [x] Setup UART to send data to PC
+- [x] Setup ADC to sample potentiometer value
