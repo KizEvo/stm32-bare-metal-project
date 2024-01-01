@@ -7,24 +7,23 @@ CFLAGS= -Wall -Wextra -mthumb -mcpu=${MTYPE} ${OPTFLAG}
 # https://github.com/JayHeng/cortex-m-spec/blob/master/ARM%20Cortex-M%20for%20Beginners.pdf
 LDFLAGS= -Tlinker.ld -nostdlib -Wl,-Map=main.map
 # -nostdlib means don't use the standard startup file and libraries when linking
-OBJFILES=main.o
+OBJFILES=startup.o main.o
 ELFFILES=main.elf
 BINFILES=build.bin
-CFILES=main.c
 
 all: ${ELFFILES}
 
 ${ELFFILES}: ${OBJFILES}
 	${CC} ${LDFLAGS} -o $@ $^
 	
-${OBJFILES}: ${CFILES}
+%.o: %.c
 	${CC} ${CFLAGS} -c -o $@ $^
 
 build: ${BINFILES}
-	st-flash --reset write $^ 0x08000000
+	st-flash --reset write $< 0x08000000
 
 ${BINFILES}: ${ELFFILES}
-	arm-none-eabi-objcopy -O binary $^ $@
+	arm-none-eabi-objcopy -O binary $< $@
 
 clean:
 	rm -f *.o *.elf *.map *.bin *.txt
