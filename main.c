@@ -1,5 +1,7 @@
 #include <stdint.h>
 
+extern int main(void);
+
 typedef struct {
 	volatile uint32_t CRL, CRH, IDR, ODR, BSRR, BRR, LCKR;
 } GPIO_TypeDef;
@@ -7,6 +9,10 @@ typedef struct {
 typedef struct {
 	volatile uint32_t CR, CFGR, CIR, APB2RSTR, APB1RSTR, AHBENR, APB2ENR, APB1ENR, BDCR, CSR, AHBSTR, CFGR2;
 } RCC_TypeDef;
+
+typedef struct {
+	volatile uint32_t ISER[3], ICER[3], ISPR[3], ICPR[3], IABR[3], IPR[21];
+} NVIC_TypeDef;
 
 typedef struct {
 	volatile uint32_t CTRL, LOAD, VAL, CALIB;
@@ -28,6 +34,7 @@ void delay(uint16_t ms);
 #define USART1_Init		((USART_TypeDef *)(0x40013800))
 #define ADC1_Init		((ADC_TypeDef *)(0x40012400))
 // Refer to STM32F10xxx Cortex M3 programming manual
+#define NVIC_Init		((NVIC_TypeDef *)(0xE000E100))
 #define STK_Init    	((STK_TypeDef *)(0xE000E010))
 
 enum GPIO_BANK {A, B, C, D, E, F, G};
@@ -38,6 +45,7 @@ enum APB2_ENABLE_CLOCK		{AFIO_CK, IOPA_CK = 2, IOPB_CK, IOPC_CK, IOPD_CK, IOPE_C
 
 // Initialize peripherals
 RCC_TypeDef *RCC = RCC_Init;				// Reset and clock control
+NVIC_TypeDef *NVIC = NVIC_Init;				// Nested vector interrupt controller NVIC
 GPIO_TypeDef *GPIOC = GPIO_Init(C);			// GPIOC
 GPIO_TypeDef *GPIOA = GPIO_Init(A);			// GPIOA
 STK_TypeDef *STK = STK_Init;				// SysTick
@@ -45,7 +53,8 @@ USART_TypeDef *USART1 = USART1_Init;		// USART1
 ADC_TypeDef *ADC1 = ADC1_Init;				// ADC1
 
 // Global variables
-volatile uint16_t ADC_CAL_ERR_VAL;
+volatile uint16_t ADC_CAL_ERR_VAL;			// ADC calibration value
+volatile uint8_t UART_RX_VAL;					// Value read from UART receive interrupt
 
 void GPIO_PortConfig(GPIO_TypeDef *GPIO, uint8_t pin, uint8_t mode, uint8_t cnf)
 {
@@ -91,24 +100,40 @@ void RCC_SystemClockInit(void)
 	RCC->CFGR |= (0b10 << 0);
 }
 
+void NVIC_EnableIRQ(uint32_t position)
+{
+	// Read previous enabled IRQ
+	uint32_t prev_enabled_irq = NVIC->ISER[position >> 5];
+	// Write the previous enabled IRQ with the new IRQ position
+	NVIC->ISER[position >> 5] = prev_enabled_irq | (1 << (position - 32*(position >> 5)));
+}
 
-void USART1_TransmitConfig(void)
+void USART1_TransmitReceiveConfig(void)
 {
 	// Word length = 8
 	// 1 stop bit
 	// Default
 		
-	// Enable USART transmitter
+	// Enable USART1
 	USART1->CR1 |= (1 << 13);
 	
-	// Baud rate = f_CLK / (16*USARTDIV) = 32MHz / (16*208.333) = 9600 baud
+	// Baud rate = f_CLK / (16*USARTDIV) = 32MHz / (16*208.375) = 9598.08 baud
 	// USARTDIV = mantissa.(fraction / 16)
 	uint32_t mantissa = 208;
 	uint8_t fraction = 6;
 	USART1->BRR = ((mantissa << 4) | fraction);
 
-	// Start bit, (active low)
+	// Start bit, (active low) - transmission
 	USART1->CR1 |= (1 << 3);
+	
+	// Enable receive interrupt, RXNEIE bit
+	USART1->CR1 |= (1 << 5);
+	
+	// Enable NVIC for UART
+	NVIC_EnableIRQ(37);
+	
+	// Set RE bit (look for start bit) - receive
+	USART1->CR1 |= (1 << 2);
 }
 
 void USART1_WriteBuffer(char byte)
@@ -237,7 +262,7 @@ int main(void)
 	// ADC1 channel 1
 	GPIO_PortConfig(GPIOA, 1, MODE_INPUT, INPUT_ANALOG);
 	
-	USART1_TransmitConfig();
+	USART1_TransmitReceiveConfig();
 	ADC1_Config();
 	
 	// start ADC conversion of regular channel
@@ -245,7 +270,7 @@ int main(void)
 	
 	while(1)
 	{
-		if((ADC1->SR & 1 << 1) != 0)
+		if((ADC1->SR & 1 << 1) != 0 && UART_RX_VAL == '1')
 		{
 			uint16_t adc_raw_data = ADC1->DR;
 			adc_raw_data -= ADC_CAL_ERR_VAL;
@@ -257,6 +282,9 @@ int main(void)
 			USART_WriteString("\r\n");
 			ADC1->SR &= ~(1 << 1);	// clears ADC EOC flag
 			ADC1->CR2 |= (1 << 22); // start ADC conversion of regular channel
+		} else
+		{
+			USART_WriteString("No action\r\n");
 		}
 		GPIOC->ODR &= ~(1 << 13);
 		delay(500);
@@ -266,190 +294,10 @@ int main(void)
 	return 0;
 }
 
-// Startup code
-__attribute__((noreturn, naked)) void Reset_Handler(void)
+void USART1_Handler(void)
 {
-	// Start and end address of different sections defined in linker.ld
-	extern uint32_t _sdata, _edata, _sbss, _ebss, _sizedata;
-	
-	// .bss section, zero initialize variables
-	for(uint32_t *dest = &_sbss; dest < &_ebss; dest++)
-	{
-		*dest = 0;
-	}
-	
-	// .data section, copy from flash to sram
-	uint32_t *src = &_sizedata, *dest = &_sdata;
-	while(dest < &_edata)
-	{
-		*dest++ = *src++;
-	}
-	
-	// Call main()
-	main();
-	
-	// Loop forever if main() return
-	while (1);
-}
-
-// Stack pointer, defined in linker.ld
-extern void _estack(void);
-
-// Vector Handlers: Systems
-__attribute__ ((weak, alias ("Default_Handler"))) void NMI_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void HardFault_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void MemManage_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void BusFault_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void UsageFault_Handler(void);
-	// Reserved 0x0000_001C - 0x0000_002B (0 0 0 0)
-__attribute__ ((weak, alias ("Default_Handler"))) void SVCall_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void DebugMonitor_Handler(void);
-	// Reserved 0x0000_0034
-__attribute__ ((weak, alias ("Default_Handler"))) void PendSV_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void SysTick_Handler(void);
-// Vector Handlers: Interrupts
-__attribute__ ((weak, alias ("Default_Handler"))) void WWDG_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void PVD_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void TAMPER_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void RTC_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void FLASH_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void RCC_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void EXTI0_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void EXTI1_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void EXTI2_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void EXTI3_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void EXTI4_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void DMA1_Channel1_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void DMA1_Channel2_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void DMA1_Channel3_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void DMA1_Channel4_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void DMA1_Channel5_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void DMA1_Channel6_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void DMA1_Channel7_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void ADC1_2_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void USB_HP_CAN__Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void USB_LP_CAN__Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void CAN_RX1_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void CAN_SCE_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void EXTI9_5_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void TIM1_BRK_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void TIM1_UP_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void TIM1_TRG_COM_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void TIM1_CC_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void TIM2_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void TIM3_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void TIM4_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void I2C1_EV_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void I2C1_ER_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void I2C2_EV_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void I2C2_ER_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void SPI1_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void SPI2_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void USART1_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void USART2_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void USART3_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void EXTI15_10_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void RTCAlarm_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void USBWakeup_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void TIM8_BRK_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void TIM8_UP_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void TIM8_TRG_COM_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void TIM8_CC_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void ADC3_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void FSMC_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void SDIO_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void TIM5_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void SPI3_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void UART4_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void UART5_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void TIM6_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void TIM7_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void DMA2_Channel1_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void DMA2_Channel2_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void DMA2_Channel3_Handler(void);
-__attribute__ ((weak, alias ("Default_Handler"))) void DMA2_Channel4_5_Handler(void);
-
-// Vector tables
-__attribute__((section(".vectors"))) void (*const tables[])(void) = {
-	_estack,
-	Reset_Handler,
-	NMI_Handler,
-	HardFault_Handler,
-	MemManage_Handler,
-	BusFault_Handler,
-	UsageFault_Handler,
-	0,
-	0,
-	0,
-	0,
-	SVCall_Handler,
-	DebugMonitor_Handler,
-	0,
-	PendSV_Handler,
-	SysTick_Handler,
-	WWDG_Handler,
-	PVD_Handler,
-	TAMPER_Handler,
-	RTC_Handler,
-	FLASH_Handler,
-	RCC_Handler,
-	EXTI0_Handler,
-	EXTI1_Handler,
-	EXTI2_Handler,
-	EXTI3_Handler,
-	EXTI4_Handler,
-	DMA1_Channel1_Handler,
-	DMA1_Channel2_Handler,
-	DMA1_Channel3_Handler,
-	DMA1_Channel4_Handler,
-	DMA1_Channel5_Handler,
-	DMA1_Channel6_Handler,
-	DMA1_Channel7_Handler,
-	ADC1_2_Handler,
-	USB_HP_CAN__Handler,
-	USB_LP_CAN__Handler,
-	CAN_RX1_Handler,
-	CAN_SCE_Handler,
-	EXTI9_5_Handler,
-	TIM1_BRK_Handler,
-	TIM1_UP_Handler,
-	TIM1_TRG_COM_Handler,
-	TIM1_CC_Handler,
-	TIM2_Handler,
-	TIM3_Handler,
-	TIM4_Handler,
-	I2C1_EV_Handler,
-	I2C1_ER_Handler,
-	I2C2_EV_Handler,
-	I2C2_ER_Handler,
-	SPI1_Handler,
-	SPI2_Handler,
-	USART1_Handler,
-	USART2_Handler,
-	USART3_Handler,
-	EXTI15_10_Handler,
-	RTCAlarm_Handler,
-	USBWakeup_Handler,
-	TIM8_BRK_Handler,
-	TIM8_UP_Handler,
-	TIM8_TRG_COM_Handler,
-	TIM8_CC_Handler,
-	ADC3_Handler,
-	FSMC_Handler,
-	SDIO_Handler,
-	TIM5_Handler,
-	SPI3_Handler,
-	UART4_Handler,
-	UART5_Handler,
-	TIM6_Handler,
-	TIM7_Handler,
-	DMA2_Channel1_Handler,
-	DMA2_Channel2_Handler,
-	DMA2_Channel3_Handler,
-	DMA2_Channel4_5_Handler
-};
-
-void Default_Handler(void)
-{
-	while(1);
+	// Read received data, only need 0-6 data bit incase there is parity bit at the MSB
+	UART_RX_VAL = USART1->DR & 0x7F;
+	// Clear rx flag
+	USART1->SR &= ~(1 << 5);
 }
